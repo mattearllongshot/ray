@@ -324,6 +324,7 @@ class StandardAutoscaler(object):
         self.num_failures = 0
         self.last_update_time = 0.0
         self.update_interval_s = update_interval_s
+        self.bringup = True
 
         # Node launchers
         self.launch_queue = queue.Queue()
@@ -373,7 +374,7 @@ class StandardAutoscaler(object):
         logger.info(self.info_string(nodes))
         self.load_metrics.prune_active_ips(
             [self.provider.internal_ip(node_id) for node_id in nodes])
-        target_workers = self.target_num_workers()
+        target_workers = self.config["max_workers"] if self.bringup else self.target_num_workers()
 
         # Terminate any idle or out of date nodes
         last_used = self.load_metrics.last_used_time_by_ip
@@ -416,6 +417,8 @@ class StandardAutoscaler(object):
             num_launches = min(max_allowed, target_workers - num_workers)
             self.launch_new_node(num_launches)
             logger.info(self.info_string())
+        else:
+            self.bringup = False
 
         # Process any completed updates
         completed = []
@@ -491,8 +494,15 @@ class StandardAutoscaler(object):
     def recover_if_needed(self, node_id):
         if not self.can_update(node_id):
             return
-        last_heartbeat_time = self.load_metrics.last_heartbeat_time_by_ip.get(
-            self.provider.internal_ip(node_id), 0)
+
+        ip = self.provider.internal_ip(node_id) 
+        if ip not in self.load_metrics.last_heartbeat_time_by_ip:
+            # Give new nodes 30 seconds to send their first heartbeat.
+            t = time.time() + 30
+            logger.warning("Setting initial heartbeat time for {} ({}) to {}".format(node_id, ip, t))
+            self.load_metrics.last_heartbeat_time_by_ip[ip] = t
+
+        last_heartbeat_time = self.load_metrics.last_heartbeat_time_by_ip[ip]
         delta = time.time() - last_heartbeat_time
         if delta < AUTOSCALER_HEARTBEAT_TIMEOUT_S:
             return
